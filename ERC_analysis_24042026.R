@@ -706,7 +706,7 @@ is_chromosome <- function(seqnames) {
   !grepl("plasmid", seqnames, ignore.case = TRUE)
 }
 
-run_g4hunt_chr <- function(fasta_path, out_file, window = 25, threshold = 1.2) {
+run_g4hunt_chr <- function(fasta_path, out_file, window = 25, threshold = 2.0) {
   all_seqs <- readDNAStringSet(fasta_path)
   seq_names <- names(all_seqs)
   chr_idx <- which(is_chromosome(seq_names))
@@ -786,13 +786,121 @@ results_table <- map_df(names(genome_stats), function(base) {
     Name        = ifelse(base %in% names(name_map), name_map[base], base),
     Genome_size = stats$genome_len,
     GC_percent  = round(stats$gc_pct, 2),
-    G4_count    = nrow(df),
-    G4_density  = round(nrow(df) / (stats$genome_len / 1e6), 2)
+    G4_count    = nrow(df)-1,
+    # G4_density  = round(nrow(df) / (stats$genome_len / 1e6), 2)
+    G4_density  = round(G4_count / (stats$genome_len / 1e6), 2)
   )
 })
 
 print(results_table)
 write_csv(results_table, "piezophiles_G4_summary.csv")
 
+# ====== RADIATION-tolerant =======
+library(G4SNVHunter)
+library(Biostrings)
+library(purrr)
+library(readr)
+library(stringr)
+library(dplyr)
 
+setwd('/home/dimitri/project4/ERC/radiationTolerant/')
+root_dir <- "."
+
+# --- Helper functions ---
+is_chromosome <- function(seqnames) {
+  !grepl("plasmid", seqnames, ignore.case = TRUE)
+}
+
+# is_chromosome <- function(seqnames) {
+#   !grepl("mitochond|chloroplast", seqnames, ignore.case = TRUE)
+# }
+
+run_g4hunt_chr <- function(fasta_path, out_file, window = 25, threshold = 3.0) {
+  all_seqs <- readDNAStringSet(fasta_path)
+  seq_names <- names(all_seqs)
+  chr_idx <- which(is_chromosome(seq_names))
+  
+  if (length(chr_idx) == 0) {
+    warning("No chromosomes found in: ", fasta_path)
+    return(NULL)
+  }
+  
+  chr_seqs <- all_seqs[chr_idx]
+  clean_seqs <- DNAStringSet(gsub("[^ACGTUN]", "N", toupper(as.character(chr_seqs))))
+  names(clean_seqs) <- seq_names[chr_idx]
+  
+  message("  Analyzing ", length(clean_seqs), " chromosome(s)...")
+  
+  tryCatch({
+    g4res <- G4HunterDetect(clean_seqs, window_size = window, threshold = threshold)
+    exportG4(g4res, filename = out_file, include_metadata = TRUE)
+    
+    # Return genome stats to avoid re-reading FASTA later
+    list(
+      genome_len = sum(width(chr_seqs)),
+      gc_pct     = sum(letterFrequency(chr_seqs, "GC")) / sum(width(chr_seqs)) * 100
+    )
+  }, error = function(e) {
+    message("  Error: ", e$message)
+    NULL
+  })
+}
+
+# --- Name map ---
+name_map <- c(
+  "GCF_020546685.1" = "Deinococcus radiodurans",
+  "GCF_000022365.1" = "Thermococcus gammatolerans",
+  "GCF_000149245.1" = "Cryptococcus neoformans (Fungus)",
+  "GCF_000230625.1" = "Exophiala dermatitidis (Yeast)",
+  "GCA_001949185.1" = "Tardigrades - Ramazzottius varieornatus"
+)
+
+# --- Run G4Hunter and collect stats ---
+genome_stats <- list()
+
+dirs <- list.dirs(root_dir, recursive = FALSE)
+for (d in dirs) {
+  fasta <- list.files(d, pattern = "\\.fna$|\\.fasta$", full.names = TRUE)
+  
+  if (length(fasta) == 0) next
+  if (length(fasta) > 1) {
+    warning("Multiple FASTA files found in ", d, " — using only: ", fasta[1])
+    fasta <- fasta[1]
+  }
+  
+  base    <- basename(d)
+  outfile <- file.path(root_dir, paste0(base, "_chr_G4Hunter.csv"))
+  
+  message("Processing ", base)
+  stats <- run_g4hunt_chr(fasta_path = fasta, out_file = outfile)
+  
+  if (!is.null(stats)) genome_stats[[base]] <- stats
+}
+
+# --- Build summary table ---
+g4_col_names <- c("genome","seqnames","start","end","width","strand",
+                  "score","max_score","sequence","G_rich_sequence")
+
+results_table <- map_df(names(genome_stats), function(base) {
+  outfile <- file.path(root_dir, paste0(base, "_chr_G4Hunter.csv"))
+  
+  df <- read_csv(outfile,
+                 skip      = 1,
+                 col_names = g4_col_names,
+                 show_col_types = FALSE)
+  
+  stats <- genome_stats[[base]]
+  
+  tibble(
+    Name        = ifelse(base %in% names(name_map), name_map[base], base),
+    Genome_size = stats$genome_len,
+    GC_percent  = round(stats$gc_pct, 2),
+    G4_count    = nrow(df)-1,
+    # G4_density  = round(nrow(df) / (stats$genome_len / 1e6), 2)
+    G4_density  = round(G4_count / (stats$genome_len / 1e6), 2)
+  )
+})
+
+print(results_table)
+write_csv(results_table, "radiationTolerant_G4_summary.csv")
 
